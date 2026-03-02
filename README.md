@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="openclaw-control-panel.ico" alt="OpenClaw Control Panel Logo" width="120" height="120" />
+  <img src="banner.jpg" alt="OpenClaw Control Panel Banner" width="100%" />
   <h1>OpenClaw Windows 控制面板 🎛️</h1>
 
   <p>
