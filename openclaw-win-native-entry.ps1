@@ -2,7 +2,7 @@ param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
 $ErrorActionPreference = 'Stop'
 
 $wslExe = Join-Path $env:SystemRoot 'System32\wsl.exe'
-$gatewayUrl = if ($env:OPENCLAW_DASHBOARD_URL_BASE) { $env:OPENCLAW_DASHBOARD_URL_BASE.Trim() } else { 'http://127.0.0.1:18789/' }
+$gatewayUrl = if ($env:OPENCLAW_DASHBOARD_URL_BASE) { $env:OPENCLAW_DASHBOARD_URL_BASE.Trim() } else { 'http://127.0.0.1:18790/' }
 if (-not $gatewayUrl.EndsWith('/')) { $gatewayUrl += '/' }
 $healthUrl = $gatewayUrl.TrimEnd('/') + '/health'
 $serviceName = if ($env:OPENCLAW_WSL_NATIVE_SERVICE) { $env:OPENCLAW_WSL_NATIVE_SERVICE.Trim() } else { 'openclaw-gateway.service' }
@@ -24,25 +24,7 @@ function Get-ControlUiUrl {
   if ($env:OPENCLAW_CONTROL_UI_URL_BASE) {
     return $env:OPENCLAW_CONTROL_UI_URL_BASE.Trim()
   }
-
-  $raw = $gatewayUrl.Trim()
-  if ($raw -match '/chat\?session=main/?$') {
-    return $raw
-  }
-
-  try {
-    $uri = [Uri]$raw
-    $builder = [System.UriBuilder]::new($uri)
-    if ($builder.AbsolutePath -eq '/' -or [string]::IsNullOrWhiteSpace($builder.AbsolutePath)) {
-      $builder.Path = '/chat'
-      $builder.Query = 'session=main'
-      return $builder.Uri.AbsoluteUri
-    }
-  }
-  catch {
-  }
-
-  return ($raw.TrimEnd('/') + '/chat?session=main')
+  return $gatewayUrl.Trim()
 }
 
 function Invoke-WslCapture {
@@ -56,23 +38,56 @@ function Invoke-WslCapture {
   }
 }
 
+function Get-BridgeDashboardUrl {
+  $result = Invoke-WslCapture 'openclaw dashboard --no-open'
+  if ($result.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($result.Output)) {
+    foreach ($line in ($result.Output -split "`r?`n")) {
+      $trimmed = $line.Trim()
+      if ($trimmed -match '^Dashboard URL:\s*(\S+)$') {
+        return $Matches[1]
+      }
+      if ($trimmed -match '^dashboard_url=(\S+)$') {
+        return $Matches[1]
+      }
+      if ($trimmed -match '^https?://\S+$') {
+        return $trimmed
+      }
+    }
+  }
+  return ''
+}
+
 function Quote-WslLiteral {
   param([string]$Value)
   return "'" + $Value.Replace("'", "'""'""'") + "'"
 }
 
 function Get-GatewayToken {
-  $result = Invoke-WslCapture "if [ -f ~/.openclaw/.gateway-token ] && [ -s ~/.openclaw/.gateway-token ]; then tr -d '\r\n' < ~/.openclaw/.gateway-token; else printf 'dev-local-token'; fi"
-  if ($result.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($result.Output)) {
-    return $result.Output
+  $dashboardUrl = Get-BridgeDashboardUrl
+  if (-not [string]::IsNullOrWhiteSpace($dashboardUrl)) {
+    if ($dashboardUrl -match '[?#]token=([^&]+)') {
+      return $Matches[1]
+    }
   }
-  return 'dev-local-token'
+
+  $result = Invoke-WslCapture "if [ -f ~/.openclaw/.gateway-token ] && [ -s ~/.openclaw/.gateway-token ]; then tr -d '\r\n' < ~/.openclaw/.gateway-token; else printf ''; fi"
+  if ($result.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($result.Output)) {
+    if ($result.Output -ne '__OPENCLAW_REDACTED__' -and $result.Output -ne 'dev-local-token') {
+      return $result.Output
+    }
+  }
+  return ''
 }
 
 function Get-HttpCode {
   param([string]$Url)
   try {
     return [string](Invoke-WebRequest -UseBasicParsing -Uri $Url -TimeoutSec 4).StatusCode
+  } catch [System.Net.WebException] {
+    if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
+      return [string][int]$_.Exception.Response.StatusCode
+    }
+    return '000'
   } catch {
     return '000'
   }
@@ -293,8 +308,14 @@ if ($Args.Count -ge 1 -and $Args[0] -eq 'status') {
 }
 
 if ($Args.Count -ge 1 -and $Args[0] -eq 'dashboard') {
-  $token = Get-GatewayToken
-  $url = (Get-ControlUiUrl) + '#token=' + $token
+  $url = Get-BridgeDashboardUrl
+  if ([string]::IsNullOrWhiteSpace($url)) {
+    $token = Get-GatewayToken
+    $url = Get-ControlUiUrl
+    if (-not [string]::IsNullOrWhiteSpace($token)) {
+      $url += '#token=' + $token
+    }
+  }
   Open-DashboardUrl -Url $url
   Write-Output ('dashboard_url=' + $url)
   exit 0

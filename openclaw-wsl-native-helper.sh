@@ -17,20 +17,13 @@ CONFIG_PATH="${OPENCLAW_CONFIG_PATH:-$DATA_DIR/openclaw.json}"
 SESSIONS_PATH="${OPENCLAW_MAIN_SESSION_STORE:-$DATA_DIR/agents/main/sessions/sessions.json}"
 SENTINEL_PID_FILE="${OPENCLAW_WSL_NATIVE_SENTINEL_PID_FILE:-$HOME/.openclaw/.wsl-native-gateway-sentinel.pid}"
 SENTINEL_NAME="${OPENCLAW_WSL_NATIVE_SENTINEL_NAME:-openclaw gateway sentinel}"
-DASHBOARD_URL_BASE="${OPENCLAW_DASHBOARD_URL_BASE:-http://127.0.0.1:18789/}"
+DASHBOARD_URL_BASE="${OPENCLAW_DASHBOARD_URL_BASE:-http://127.0.0.1:18790/}"
 HEALTH_URL="${OPENCLAW_WSL_NATIVE_HEALTH_URL:-${DASHBOARD_URL_BASE%/}/health}"
+OPENCLAW_BIN="${OPENCLAW_WSL_OPENCLAW_PATH:-/usr/local/bin/openclaw}"
 
 resolve_control_ui_url() {
   local raw="${OPENCLAW_CONTROL_UI_URL_BASE:-$DASHBOARD_URL_BASE}"
-  if [[ "$raw" == *"/chat?session=main" ]]; then
-    printf '%s' "$raw"
-    return 0
-  fi
-  if [[ "$raw" =~ ^(https?://[^/:]+):18790/?$ ]]; then
-    printf '%s' "${BASH_REMATCH[1]}:18789/chat?session=main"
-    return 0
-  fi
-  printf '%s' "${raw%/}/chat?session=main"
+  printf '%s' "$raw"
 }
 
 open_windows_url() {
@@ -46,6 +39,40 @@ open_windows_url() {
     explorer.exe "$url" >/dev/null 2>&1 && return 0
   fi
   return 1
+}
+
+extract_dashboard_url() {
+  local output="$1"
+  local line trimmed
+  while IFS= read -r line; do
+    trimmed="${line//$'\r'/}"
+    if [[ "$trimmed" =~ ^Dashboard\ URL:\ ([^[:space:]]+)$ ]]; then
+      printf '%s' "${BASH_REMATCH[1]}"
+      return 0
+    fi
+    if [[ "$trimmed" =~ ^dashboard_url=([^[:space:]]+)$ ]]; then
+      printf '%s' "${BASH_REMATCH[1]}"
+      return 0
+    fi
+    if [[ "$trimmed" =~ ^https?://[^[:space:]]+$ ]]; then
+      printf '%s' "$trimmed"
+      return 0
+    fi
+  done <<< "$output"
+  return 1
+}
+
+get_dashboard_url() {
+  local extra_args=()
+  local output
+  while (($#)); do
+    if [[ "$1" != "--no-open" ]]; then
+      extra_args+=("$1")
+    fi
+    shift
+  done
+  output="$("$OPENCLAW_BIN" dashboard --no-open "${extra_args[@]}" 2>/dev/null || true)"
+  extract_dashboard_url "$output" || true
 }
 
 ensure_parent_dir() {
@@ -125,10 +152,14 @@ print_runtime_diagnostics() {
 }
 
 get_token() {
-  if [[ -f "$TOKEN_FILE" && -s "$TOKEN_FILE" ]]; then
+  local url
+  url="$(get_dashboard_url)"
+  if [[ "$url" =~ [?#]token=([^&]+) ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+  elif [[ -f "$TOKEN_FILE" && -s "$TOKEN_FILE" ]]; then
     tr -d '\r\n' < "$TOKEN_FILE"
   else
-    printf 'dev-local-token'
+    printf ''
   fi
 }
 
@@ -207,17 +238,28 @@ status_block() {
 }
 
 open_dashboard() {
-  local token url
-  token="$(get_token)"
-  url="$(resolve_control_ui_url)#token=${token}"
+  local no_open url
+  no_open=0
+  for arg in "$@"; do
+    if [[ "$arg" == "--no-open" ]]; then
+      no_open=1
+      break
+    fi
+  done
+  url="$(get_dashboard_url "$@")"
+  if [[ -z "$url" ]]; then
+    url="$(resolve_control_ui_url)"
+  fi
 
-  if ! open_windows_url "$url"; then
-    if command -v wslview >/dev/null 2>&1; then
-      wslview "$url" >/dev/null 2>&1 || true
+  if [[ "$no_open" -eq 0 ]]; then
+    if ! open_windows_url "$url"; then
+      if command -v wslview >/dev/null 2>&1; then
+        wslview "$url" >/dev/null 2>&1 || true
+      fi
     fi
   fi
 
-  printf '%s\n' "$url"
+  printf 'dashboard_url=%s\n' "$url"
 }
 
 main() {
@@ -231,7 +273,7 @@ main() {
     ensure_sentinel
     if service_running; then
       echo "Runtime: running"
-      echo "Dashboard: $(resolve_control_ui_url)"
+      echo "Dashboard: $(get_dashboard_url --no-open || resolve_control_ui_url)"
     else
       echo "Runtime: stopped"
     fi
@@ -261,7 +303,7 @@ main() {
   fi
 
   if [[ "${1:-}" == "dashboard" ]]; then
-    open_dashboard
+    open_dashboard "$@"
     exit 0
   fi
 

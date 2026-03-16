@@ -31,25 +31,7 @@ function Get-ControlUiUrl {
   if ($env:OPENCLAW_CONTROL_UI_URL_BASE) {
     return $env:OPENCLAW_CONTROL_UI_URL_BASE.Trim()
   }
-
-  $raw = $gatewayUrl.Trim()
-  if ($raw -match '/chat\?session=main/?$') {
-    return $raw
-  }
-
-  try {
-    $uri = [Uri]$raw
-    $builder = [System.UriBuilder]::new($uri)
-    if ($builder.Port -eq 18790) {
-      $builder.Port = 18789
-    }
-    $builder.Path = '/chat'
-    $builder.Query = 'session=main'
-    return $builder.Uri.AbsoluteUri
-  }
-  catch {
-    return ($raw.TrimEnd('/') + '/chat?session=main')
-  }
+  return $gatewayUrl.Trim()
 }
 
 function Ensure-BridgeInstalled {
@@ -84,11 +66,44 @@ function Invoke-Bridge {
   }
 }
 
+function Get-BridgeDashboardUrl {
+  if ($script:BridgeDashboardUrlCache) {
+    return $script:BridgeDashboardUrlCache
+  }
+
+  $result = Invoke-Bridge dashboard --no-open
+  if ($result.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($result.Output)) {
+    foreach ($line in ($result.Output -split "`r?`n")) {
+      $trimmed = $line.Trim()
+      if ($trimmed -match '^Dashboard URL:\s*(\S+)$') {
+        $script:BridgeDashboardUrlCache = $Matches[1]
+        return $script:BridgeDashboardUrlCache
+      }
+      if ($trimmed -match '^dashboard_url=(\S+)$') {
+        $script:BridgeDashboardUrlCache = $Matches[1]
+        return $script:BridgeDashboardUrlCache
+      }
+      if ($trimmed -match '^https?://\S+$') {
+        $script:BridgeDashboardUrlCache = $trimmed
+        return $script:BridgeDashboardUrlCache
+      }
+    }
+  }
+
+  return ''
+}
+
 function Get-HttpCode {
   param([Parameter(Mandatory = $true)][string]$Url)
 
   try {
     return [string](Invoke-WebRequest -UseBasicParsing -Uri $Url -TimeoutSec 4).StatusCode
+  }
+  catch [System.Net.WebException] {
+    if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
+      return [string][int]$_.Exception.Response.StatusCode
+    }
+    return '000'
   }
   catch {
     return '000'
@@ -145,11 +160,21 @@ function Stop-Gateway {
 }
 
 function Get-GatewayToken {
+  $dashboardUrl = Get-BridgeDashboardUrl
+  if (-not [string]::IsNullOrWhiteSpace($dashboardUrl)) {
+    if ($dashboardUrl -match '[?#]token=([^&]+)') {
+      return $Matches[1]
+    }
+  }
+
   $result = Invoke-Bridge config get gateway.auth.token
   if ($result.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($result.Output)) {
-    return $result.Output.Trim()
+    $token = $result.Output.Trim()
+    if ($token -ne '__OPENCLAW_REDACTED__' -and $token -ne 'dev-local-token') {
+      return $token
+    }
   }
-  return 'dev-local-token'
+  return ''
 }
 
 function Get-GatewayState {
@@ -292,8 +317,14 @@ if ($Args.Count -ge 1 -and $Args[0] -eq 'status') {
 }
 
 if ($Args.Count -ge 1 -and $Args[0] -eq 'dashboard') {
-  $token = Get-GatewayToken
-  $url = (Get-ControlUiUrl) + '#token=' + $token
+  $url = Get-BridgeDashboardUrl
+  if ([string]::IsNullOrWhiteSpace($url)) {
+    $token = Get-GatewayToken
+    $url = Get-ControlUiUrl
+    if (-not [string]::IsNullOrWhiteSpace($token)) {
+      $url += '#token=' + $token
+    }
+  }
   Open-DashboardUrl -Url $url
   Write-Output ('dashboard_url=' + $url)
   exit 0

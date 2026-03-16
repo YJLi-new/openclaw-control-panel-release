@@ -2,6 +2,7 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+openclaw_bin="${OPENCLAW_WSL_OPENCLAW_PATH:-/usr/local/bin/openclaw}"
 
 wsl_to_windows_path() {
   local path="$1"
@@ -20,15 +21,7 @@ entry_script="${OPENCLAW_WIN_ADMIN_WSL_ENTRY:-${bundle_windows_dir}\\openclaw-wi
 
 resolve_control_ui_url() {
   local raw="${OPENCLAW_CONTROL_UI_URL_BASE:-${OPENCLAW_DASHBOARD_URL_BASE:-http://127.0.0.1:18790/}}"
-  if [[ "$raw" == *"/chat?session=main" ]]; then
-    printf '%s' "$raw"
-    return 0
-  fi
-  if [[ "$raw" =~ ^(https?://[^/:]+):18790/?$ ]]; then
-    printf '%s' "${BASH_REMATCH[1]}:18789/chat?session=main"
-    return 0
-  fi
-  printf '%s' "${raw%/}/chat?session=main"
+  printf '%s' "$raw"
 }
 
 open_windows_url() {
@@ -46,12 +39,56 @@ open_windows_url() {
   return 1
 }
 
+extract_dashboard_url() {
+  local output="$1"
+  local line trimmed
+  while IFS= read -r line; do
+    trimmed="${line//$'\r'/}"
+    if [[ "$trimmed" =~ ^Dashboard\ URL:\ ([^[:space:]]+)$ ]]; then
+      printf '%s' "${BASH_REMATCH[1]}"
+      return 0
+    fi
+    if [[ "$trimmed" =~ ^dashboard_url=([^[:space:]]+)$ ]]; then
+      printf '%s' "${BASH_REMATCH[1]}"
+      return 0
+    fi
+    if [[ "$trimmed" =~ ^https?://[^[:space:]]+$ ]]; then
+      printf '%s' "$trimmed"
+      return 0
+    fi
+  done <<< "$output"
+  return 1
+}
+
+get_dashboard_url() {
+  local extra_args=()
+  local output
+  while (($#)); do
+    if [[ "$1" != "--no-open" ]]; then
+      extra_args+=("$1")
+    fi
+    shift
+  done
+  output="$("$openclaw_bin" dashboard --no-open "${extra_args[@]}" 2>/dev/null || true)"
+  extract_dashboard_url "$output" || true
+}
+
 if [[ "${1:-}" == "dashboard" ]]; then
-  token="$(powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$entry_script" config get gateway.auth.token)"
-  token="${token//$'\r'/}"
-  token="${token//$'\n'/}"
-  url="$(resolve_control_ui_url)#token=${token}"
-  open_windows_url "$url" || true
+  shift || true
+  no_open=0
+  for arg in "$@"; do
+    if [[ "$arg" == "--no-open" ]]; then
+      no_open=1
+      break
+    fi
+  done
+  url="$(get_dashboard_url "$@")"
+  if [[ -z "$url" ]]; then
+    url="$(resolve_control_ui_url)"
+  fi
+  if [[ "$no_open" -eq 0 ]]; then
+    open_windows_url "$url" || true
+  fi
   printf 'dashboard_url=%s\n' "$url"
   exit 0
 fi
