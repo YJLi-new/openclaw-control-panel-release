@@ -159,6 +159,40 @@ function Get-RuntimeDiagnostics {
   )
 }
 
+function Open-DashboardUrl {
+  param([Parameter(Mandatory = $true)][string]$Url)
+
+  try {
+    Start-Process $Url | Out-Null
+    return
+  }
+  catch {
+  }
+
+  try {
+    Start-Process -FilePath 'explorer.exe' -ArgumentList $Url | Out-Null
+    return
+  }
+  catch {
+  }
+
+  $taskName = 'OpenClawDashboardOpenOnce'
+  $command = "Start-Process '$Url'"
+  $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($command))
+  $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoLogo -NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + $encoded)
+  $principal = New-ScheduledTaskPrincipal -UserId $windowsUser -LogonType Interactive -RunLevel Highest
+  $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -StartWhenAvailable
+  Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -Force | Out-Null
+  try {
+    Start-ScheduledTask -TaskName $taskName
+    Start-Sleep -Milliseconds 800
+    return
+  }
+  finally {
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+  }
+}
+
 function Write-StatusBlock {
   param([Parameter(Mandatory = $true)][string]$Action)
 
@@ -227,7 +261,7 @@ if ($Args.Count -ge 1 -and $Args[0] -eq 'status') {
 if ($Args.Count -ge 1 -and $Args[0] -eq 'dashboard') {
   $token = Get-GatewayToken
   $url = $gatewayUrl + '#token=' + $token
-  Start-Process $url | Out-Null
+  Open-DashboardUrl -Url $url
   Write-Output ('dashboard_url=' + $url)
   exit 0
 }

@@ -200,6 +200,24 @@ function Stop-Gateway {
   Invoke-WslCapture "systemctl --user stop $serviceName || true" | Out-Null
 }
 
+function Open-DashboardUrl {
+  param([Parameter(Mandatory = $true)][string]$Url)
+
+  try {
+    Start-Process $Url | Out-Null
+    return
+  }
+  catch {
+  }
+
+  try {
+    & explorer.exe $Url | Out-Null
+    return
+  }
+  catch {
+  }
+}
+
 if ($Args.Count -ge 3 -and $Args[0] -eq 'config' -and $Args[1] -eq 'get' -and $Args[2] -eq 'gateway.auth.token') {
   Write-Output (Get-GatewayToken)
   exit 0
@@ -244,7 +262,7 @@ if ($Args.Count -ge 1 -and $Args[0] -eq 'status') {
 if ($Args.Count -ge 1 -and $Args[0] -eq 'dashboard') {
   $token = Get-GatewayToken
   $url = $gatewayUrl + '#token=' + $token
-  Start-Process $url | Out-Null
+  Open-DashboardUrl -Url $url
   Write-Output ('dashboard_url=' + $url)
   exit 0
 }
