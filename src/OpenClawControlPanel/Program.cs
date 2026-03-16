@@ -265,6 +265,13 @@ namespace OpenClawControlPanel
             TryWriteLogLine(ts + " [" + label + "] " + msg);
         }
 
+        private static bool IsUiTraceEnabled()
+        {
+            string value = Environment.GetEnvironmentVariable("OPENCLAW_PANEL_TRACE_UI");
+            return string.Equals(value, "1", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(value, "true", StringComparison.OrdinalIgnoreCase);
+        }
+
         private sealed class MainForm : Form
         {
             private enum UiLanguage
@@ -355,6 +362,9 @@ namespace OpenClawControlPanel
             private readonly Panel _actionsPanel;
             private readonly Panel _logCardPanel;
             private readonly Timer _busyTimer;
+            private readonly Timer _startupProbeTimer;
+            private readonly Timer _logFlushTimer;
+            private readonly Queue<LogEntry> _pendingLogEntries = new Queue<LogEntry>();
             private string _busyText = "";
             private int _busyTick;
             private int _settingsDialogAttemptCounter;
@@ -365,6 +375,8 @@ namespace OpenClawControlPanel
 
             private bool _busy;
             private bool _initialRevealDone;
+            private bool _startupProbePending = true;
+            private int _operationGeneration;
             private int _windowCornerRadius = 18;
             private Color _cardBackgroundColor = Color.White;
             private Color _cardBorderColor = Color.FromArgb(220, 226, 236);
@@ -453,6 +465,13 @@ namespace OpenClawControlPanel
                 Bad
             }
 
+            private sealed class LogEntry
+            {
+                public string Timestamp;
+                public string Message;
+                public Color MessageColor;
+            }
+
             private sealed class ActionButtonVisual
             {
                 public string Text = string.Empty;
@@ -513,10 +532,8 @@ namespace OpenClawControlPanel
                 DoubleBuffered = true;
                 SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
                 UpdateStyles();
-                Opacity = 0D;
                 AutoScaleMode = AutoScaleMode.Dpi;
                 AutoScaleDimensions = new SizeF(96F, 96F);
-                Paint += MainFormPaint;
                 try
                 {
                     string iconPath = IconFileWindows;
@@ -559,7 +576,6 @@ namespace OpenClawControlPanel
                 root.Controls.Add(_footerLabel, 0, 3);
 
                 Controls.Add(root);
-                EnableDoubleBuffering(root);
 
                 _statusBadge = (Button)_headerPanel.Tag;
                 _statusHint = (Label)_actionsPanel.Tag;
@@ -567,15 +583,28 @@ namespace OpenClawControlPanel
                 _busyTimer = new Timer();
                 _busyTimer.Interval = 900;
                 _busyTimer.Tick += BusyTimerOnTick;
+                _startupProbeTimer = new Timer();
+                _startupProbeTimer.Interval = 2000;
+                _startupProbeTimer.Tick += StartupProbeTimerOnTick;
+                _logFlushTimer = new Timer();
+                _logFlushTimer.Interval = 140;
+                _logFlushTimer.Tick += LogFlushTimerOnTick;
 
                 _btnSettings.Click += delegate
                 {
+                    CancelStartupProbe(false);
                     int attemptId = ++_settingsDialogAttemptCounter;
-                    Program.TryWriteDiagnostic("settings-click", "attempt=" + attemptId + " button clicked");
+                    if (IsUiTraceEnabled())
+                    {
+                        Program.TryWriteDiagnostic("settings-click", "attempt=" + attemptId + " button clicked");
+                    }
                     try
                     {
                         ShowSettingsDialog(attemptId);
-                        Program.TryWriteDiagnostic("settings-click", "attempt=" + attemptId + " dialog closed normally");
+                        if (IsUiTraceEnabled())
+                        {
+                            Program.TryWriteDiagnostic("settings-click", "attempt=" + attemptId + " dialog closed normally");
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -603,16 +632,11 @@ namespace OpenClawControlPanel
                     (_autoDetectMode ? Tr(" (auto)", "（自动）") : Tr(" (manual)", "（手动）")));
                 Shown += delegate
                 {
-                    UpdateWindowRoundRegion();
-                    RevealWindowAfterInitialLayout();
-                };
-                Resize += delegate
-                {
-                    UpdateWindowRoundRegion();
+                    BeginInitialLoad();
                 };
             }
 
-            private void RevealWindowAfterInitialLayout()
+            private void BeginInitialLoad()
             {
                 if (_initialRevealDone)
                 {
@@ -622,25 +646,24 @@ namespace OpenClawControlPanel
 
                 BeginInvoke((Action)delegate
                 {
-                    try
+                    if (!_busy && _startupProbePending)
                     {
-                        PerformLayout();
-                        Refresh();
-                        Update();
-                    }
-                    finally
-                    {
-                        if (Opacity < 1D)
-                        {
-                            Opacity = 1D;
-                        }
-                    }
-
-                    if (!_busy)
-                    {
-                        CheckHealth();
+                        _startupProbeTimer.Start();
                     }
                 });
+            }
+
+            private void StartupProbeTimerOnTick(object sender, EventArgs e)
+            {
+                _startupProbeTimer.Stop();
+                if (!_startupProbePending || _busy)
+                {
+                    return;
+                }
+
+                int generation = _operationGeneration;
+                _startupProbePending = false;
+                RunBackgroundHealthProbe(generation);
             }
 
             private static void EnableDoubleBuffering(Control control)
@@ -2353,9 +2376,12 @@ namespace OpenClawControlPanel
                     dialog.Bounds = after;
                 }
 
-                Program.TryWriteDiagnostic(
-                    "settings-dialog",
-                    phase + " wa=" + FormatRect(wa) + " before=" + FormatRect(before) + " after=" + FormatRect(dialog.Bounds));
+                if (IsUiTraceEnabled())
+                {
+                    Program.TryWriteDiagnostic(
+                        "settings-dialog",
+                        phase + " wa=" + FormatRect(wa) + " before=" + FormatRect(before) + " after=" + FormatRect(dialog.Bounds));
+                }
             }
 
             private static void PlaceDialogCenteredOnOwnerScreen(Form dialog, Control owner, int margin, string phasePrefix)
@@ -2378,17 +2404,25 @@ namespace OpenClawControlPanel
                 Rectangle before = dialog.Bounds;
                 dialog.Bounds = new Rectangle(x, y, width, height);
                 EnsureDialogOnScreen(dialog, owner, margin, phasePrefix + " pre-show-clamp");
-                Program.TryWriteDiagnostic(
-                    "settings-dialog",
-                    phasePrefix + " pre-show-center wa=" + FormatRect(wa) + " before=" + FormatRect(before) + " after=" + FormatRect(dialog.Bounds));
+                if (IsUiTraceEnabled())
+                {
+                    Program.TryWriteDiagnostic(
+                        "settings-dialog",
+                        phasePrefix + " pre-show-center wa=" + FormatRect(wa) + " before=" + FormatRect(before) + " after=" + FormatRect(dialog.Bounds));
+                }
             }
 
             private void ShowSettingsDialog(int attemptId)
             {
+                bool traceEnabled = IsUiTraceEnabled();
                 int traceStep = 0;
                 var traceWatch = Stopwatch.StartNew();
                 Action<string> trace = delegate(string msg)
                 {
+                    if (!traceEnabled)
+                    {
+                        return;
+                    }
                     traceStep++;
                     Program.TryWriteDiagnostic(
                         "settings-dialog",
@@ -2398,6 +2432,7 @@ namespace OpenClawControlPanel
                 trace("constructing");
                 using (var dialog = new Form())
                 {
+                    dialog.SuspendLayout();
                     dialog.Text = Tr("Settings", "设置");
                     dialog.StartPosition = FormStartPosition.Manual;
                     dialog.FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -2445,6 +2480,7 @@ namespace OpenClawControlPanel
                         RowCount = 2,
                         BackColor = pageBack
                     };
+                    root.SuspendLayout();
                     root.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
                     root.RowStyles.Add(new RowStyle(SizeType.Absolute, 68F));
                     trace("layout-root-created");
@@ -2455,47 +2491,7 @@ namespace OpenClawControlPanel
                         BackColor = pageBack,
                         ForeColor = dialog.ForeColor
                     };
-                    const int settingsTabWidth = 124;
-                    const int settingsTabHeight = 34;
-                    const int settingsTabBaselineY = 2;
-                    tabs.SizeMode = TabSizeMode.Fixed;
-                    tabs.ItemSize = new Size(settingsTabWidth, settingsTabHeight);
-                    tabs.Font = new Font("Segoe UI Semibold", 9.8F, FontStyle.Bold);
-                    tabs.DrawMode = TabDrawMode.OwnerDrawFixed;
-                    tabs.DrawItem += delegate(object sender, DrawItemEventArgs e)
-                    {
-                        if (e.Index < 0 || e.Index >= tabs.TabPages.Count)
-                        {
-                            return;
-                        }
-                        // Keep tab size stable for selected/unselected; only color changes.
-                        bool selected = tabs.SelectedIndex == e.Index;
-                        Rectangle raw = tabs.GetTabRect(e.Index);
-                        Rectangle r = new Rectangle(
-                            raw.X,
-                            settingsTabBaselineY,
-                            Math.Max(1, raw.Width - 1),
-                            Math.Max(1, settingsTabHeight - 1));
-                        Color fill = dark
-                            ? (selected ? Color.FromArgb(63, 74, 96) : Color.FromArgb(43, 50, 64))
-                            : (selected ? Color.FromArgb(224, 232, 246) : Color.FromArgb(240, 244, 251));
-                        Color border = dark ? Color.FromArgb(82, 96, 122) : Color.FromArgb(188, 202, 226);
-                        Color textColor = dark ? Color.FromArgb(234, 240, 251) : Color.FromArgb(37, 50, 76);
-                        using (var b = new SolidBrush(fill))
-                        using (var p = new Pen(border))
-                        using (var t = new SolidBrush(textColor))
-                        {
-                            e.Graphics.FillRectangle(b, r);
-                            e.Graphics.DrawRectangle(p, r.X, r.Y, r.Width - 1, r.Height - 1);
-                            TextRenderer.DrawText(
-                                e.Graphics,
-                                tabs.TabPages[e.Index].Text,
-                                tabs.Font,
-                                r,
-                                textColor,
-                                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
-                        }
-                    };
+                    tabs.Font = new Font("Segoe UI", 9.5F, FontStyle.Regular);
                     trace("layout-tabs-created");
 
                     var generalTab = new TabPage(Tr("GENERAL", "常规"));
@@ -3440,7 +3436,9 @@ namespace OpenClawControlPanel
 
                     root.Controls.Add(tabs, 0, 0);
                     root.Controls.Add(buttonsPanel, 0, 1);
+                    root.ResumeLayout(true);
                     dialog.Controls.Add(root);
+                    dialog.ResumeLayout(true);
                     trace("layout-buttons-ready");
 
                     dialog.AcceptButton = btnConfirm;
@@ -4076,6 +4074,7 @@ namespace OpenClawControlPanel
                 SetActionButtonText(_btnStop, Tr("■ Stop\nOpenClaw", "■ 停止\nOpenClaw"));
                 SetActionButtonText(_btnOpenDashboard, Tr("⌘ Open\nDashboard", "⌘ 打开\nDashboard"));
                 SetActionButtonText(_btnCheck, Tr("✓ Check\nStatus/Health", "✓ 检查\n状态/健康度"));
+                _btnSettings.Text = Tr("Settings", "设置");
                 _logTitleLabel.Text = Tr("ACTIVITY LOG", "运行日志");
                 _modeTopLabel.Text = Tr("Mode: ", "模式：") + Tr(ModeLabelEnglish(_effectiveMode), ModeLabelChinese(_effectiveMode));
                 _footerLabel.Text =
@@ -4088,34 +4087,19 @@ namespace OpenClawControlPanel
 
             private static void SetActionButtonText(Button button, string text)
             {
-                var visual = button.Tag as ActionButtonVisual;
-                if (visual == null)
-                {
-                    visual = new ActionButtonVisual();
-                    button.Tag = visual;
-                }
-                visual.Text = text ?? string.Empty;
-                button.Invalidate();
+                button.Text = text ?? string.Empty;
             }
 
             private static string GetActionButtonText(Button button)
             {
-                var visual = button.Tag as ActionButtonVisual;
-                if (visual != null && !string.IsNullOrWhiteSpace(visual.Text))
-                {
-                    return visual.Text;
-                }
                 return button.Text ?? string.Empty;
             }
 
             private static void SetActionButtonFill(Button button, Color fillColor)
             {
-                var visual = button.Tag as ActionButtonVisual;
-                if (visual != null)
-                {
-                    visual.FillColor = fillColor;
-                }
-                button.Invalidate();
+                button.BackColor = fillColor;
+                button.FlatAppearance.MouseOverBackColor = LightenColor(fillColor, 9);
+                button.FlatAppearance.MouseDownBackColor = LightenColor(fillColor, -12);
             }
 
             private void BackfillStatusTitleFromCurrentBadge()
@@ -4230,6 +4214,7 @@ namespace OpenClawControlPanel
                     SetActionButtonFill(_btnSettings, Color.FromArgb(47, 56, 75));
                     _btnSettings.ForeColor = Color.FromArgb(228, 236, 248);
                     _heroCardPanel.BackColor = Color.FromArgb(46, 51, 62);
+                    _logCardPanel.BackColor = Color.FromArgb(24, 28, 36);
                 }
                 else
                 {
@@ -4254,19 +4239,14 @@ namespace OpenClawControlPanel
                     SetActionButtonFill(_btnSettings, Color.FromArgb(245, 249, 255));
                     _btnSettings.ForeColor = Color.FromArgb(40, 52, 76);
                     _heroCardPanel.BackColor = Color.FromArgb(241, 244, 248);
+                    _logCardPanel.BackColor = Color.White;
                 }
 
                 _actionsPanel.BackColor = Color.Transparent;
-                _logCardPanel.BackColor = Color.Transparent;
 
                 ApplyActionButtonTheme(dark);
                 RefreshStatusBadgeColors();
 
-                _headerPanel.Invalidate();
-                _actionsPanel.Invalidate();
-                _logCardPanel.Invalidate();
-                _btnSettings.Invalidate();
-                Invalidate();
                 ApplyNativeTitleBarTheme();
             }
 
@@ -4287,7 +4267,6 @@ namespace OpenClawControlPanel
             protected override void OnHandleCreated(EventArgs e)
             {
                 base.OnHandleCreated(e);
-                UpdateWindowRoundRegion();
                 ApplyNativeTitleBarTheme();
             }
 
@@ -4295,12 +4274,7 @@ namespace OpenClawControlPanel
             {
                 get
                 {
-                    CreateParams cp = base.CreateParams;
-                    if (!SystemInformation.TerminalServerSession)
-                    {
-                        cp.ExStyle |= WsExComposited;
-                    }
-                    return cp;
+                    return base.CreateParams;
                 }
             }
 
@@ -4649,60 +4623,36 @@ namespace OpenClawControlPanel
                     AutoSize = false,
                     Size = new Size(190, 34),
                     FlatStyle = FlatStyle.Flat,
-                    Text = string.Empty,
+                    Text = "IDLE",
                     Font = new Font("Segoe UI", 10.3F, FontStyle.Regular),
-                    BackColor = Color.Transparent,
+                    BackColor = Color.FromArgb(236, 240, 246),
                     ForeColor = Color.FromArgb(56, 70, 94),
                     Cursor = Cursors.Default,
-                    TabStop = false
+                    TabStop = false,
+                    TextAlign = ContentAlignment.MiddleCenter
                 };
-                badge.FlatAppearance.BorderSize = 0;
-                badge.FlatAppearance.MouseOverBackColor = Color.Transparent;
-                badge.FlatAppearance.MouseDownBackColor = Color.Transparent;
-                badge.Tag = new ActionButtonVisual
-                {
-                    Text = "IDLE",
-                    FillColor = Color.FromArgb(236, 240, 246),
-                    ParseLeadingIcon = false,
-                    EnableHoverEffects = false,
-                    DrawShadow = false,
-                    CornerRadius = 16,
-                    IconSizeDelta = 0F,
-                    TextStyle = FontStyle.Regular,
-                    UseCenterTextLayout = true
-                };
-                badge.Paint += ActionButtonPaint;
+                badge.FlatAppearance.BorderSize = 1;
+                badge.FlatAppearance.BorderColor = Color.FromArgb(208, 216, 228);
+                badge.FlatAppearance.MouseOverBackColor = badge.BackColor;
+                badge.FlatAppearance.MouseDownBackColor = badge.BackColor;
 
                 var gearButton = new Button
                 {
                     AutoSize = false,
-                    Size = new Size(34, 34),
+                    Size = new Size(88, 34),
                     FlatStyle = FlatStyle.Flat,
-                    Text = string.Empty,
-                    Font = new Font("Segoe UI Symbol", 13.6F, FontStyle.Regular),
-                    BackColor = Color.Transparent,
+                    Text = Tr("Settings", "设置"),
+                    Font = new Font("Segoe UI", 9.6F, FontStyle.Regular),
+                    BackColor = Color.FromArgb(236, 240, 246),
                     ForeColor = Color.FromArgb(56, 70, 94),
                     Cursor = Cursors.Hand,
-                    TabStop = false
+                    TabStop = false,
+                    TextAlign = ContentAlignment.MiddleCenter
                 };
-                gearButton.FlatAppearance.BorderSize = 0;
-                gearButton.FlatAppearance.MouseOverBackColor = Color.Transparent;
-                gearButton.FlatAppearance.MouseDownBackColor = Color.Transparent;
-                gearButton.Tag = new ActionButtonVisual
-                {
-                    Text = "\u2699",
-                    FillColor = Color.FromArgb(236, 240, 246),
-                    ParseLeadingIcon = false,
-                    EnableHoverEffects = true,
-                    DrawShadow = false,
-                    CornerRadius = 11,
-                    IconSizeDelta = 0.8F,
-                    TextStyle = FontStyle.Regular,
-                    UseCenterTextLayout = true,
-                    CenterOffsetX = -0.55F,
-                    CenterOffsetY = -0.9F
-                };
-                gearButton.Paint += ActionButtonPaint;
+                gearButton.FlatAppearance.BorderSize = 1;
+                gearButton.FlatAppearance.BorderColor = Color.FromArgb(208, 216, 228);
+                gearButton.FlatAppearance.MouseOverBackColor = Color.FromArgb(245, 248, 253);
+                gearButton.FlatAppearance.MouseDownBackColor = Color.FromArgb(226, 232, 242);
 
                 var modeTextLabel = new Label
                 {
@@ -4736,40 +4686,8 @@ namespace OpenClawControlPanel
                 {
                     Dock = DockStyle.Fill,
                     Margin = new Padding(0, 8, 0, 0),
-                    BackColor = Color.FromArgb(236, 238, 242)
-                };
-                AttachRoundedCorners(heroCard, 18);
-                heroCard.Paint += delegate(object sender, PaintEventArgs e)
-                {
-                    var r = heroCard.ClientRectangle;
-                    Color fillStart;
-                    Color fillEnd;
-                    Color border;
-                    if (_theme == UiTheme.Dark)
-                    {
-                        fillStart = Color.FromArgb(44, 49, 60);
-                        fillEnd = Color.FromArgb(52, 57, 69);
-                        border = Color.FromArgb(66, 73, 88);
-                    }
-                    else
-                    {
-                        fillStart = Color.FromArgb(247, 249, 252);
-                        fillEnd = Color.FromArgb(236, 241, 247);
-                        border = Color.FromArgb(196, 204, 219);
-                    }
-                    using (var brush = new LinearGradientBrush(
-                        r,
-                        fillStart,
-                        fillEnd,
-                        22F))
-                    {
-                        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-                        using (var path = CreateRoundedPath(r, 18))
-                        {
-                            e.Graphics.FillPath(brush, path);
-                        }
-                    }
-                    DrawRoundedBorder(e.Graphics, r, 18, border);
+                    BackColor = Color.FromArgb(236, 238, 242),
+                    BorderStyle = BorderStyle.FixedSingle
                 };
 
                 var heroTextLayout = new TableLayoutPanel
@@ -4910,27 +4828,6 @@ namespace OpenClawControlPanel
             {
                 var panel = CreateCardPanel(true);
                 panel.Padding = new Padding(14, 12, 14, 12);
-                panel.Paint += delegate(object sender, PaintEventArgs e)
-                {
-                    var r = panel.ClientRectangle;
-                    using (var brush = new LinearGradientBrush(
-                        r,
-                        _theme == UiTheme.Dark ? Color.FromArgb(5, 7, 12) : Color.FromArgb(150, 153, 158),
-                        _theme == UiTheme.Dark ? Color.FromArgb(8, 12, 18) : Color.FromArgb(128, 131, 137),
-                        12F))
-                    {
-                        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-                        using (var path = CreateRoundedPath(r, 18))
-                        {
-                            e.Graphics.FillPath(brush, path);
-                        }
-                    }
-                    DrawRoundedBorder(
-                        e.Graphics,
-                        r,
-                        18,
-                        _theme == UiTheme.Dark ? Color.FromArgb(24, 32, 45) : Color.FromArgb(181, 185, 192));
-                };
 
                 var layout = new TableLayoutPanel
                 {
@@ -4969,12 +4866,14 @@ namespace OpenClawControlPanel
                 var logBox = new RichTextBox
                 {
                     Dock = DockStyle.Fill,
-                    BorderStyle = BorderStyle.None,
+                    BorderStyle = BorderStyle.FixedSingle,
                     ReadOnly = true,
                     BackColor = Color.FromArgb(8, 12, 18),
                     ForeColor = Color.FromArgb(223, 230, 238),
                     Font = new Font("Microsoft YaHei", 10.8F, FontStyle.Regular),
-                    DetectUrls = false
+                    DetectUrls = false,
+                    WordWrap = false,
+                    ScrollBars = RichTextBoxScrollBars.Vertical
                 };
 
                 layout.Controls.Add(headerPanel, 0, 0);
@@ -4992,58 +4891,38 @@ namespace OpenClawControlPanel
                     Dock = DockStyle.Fill,
                     BackColor = _cardBackgroundColor
                 };
-                AttachRoundedCorners(panel, 18);
-
-                if (drawBorder)
-                {
-                    panel.Paint += delegate(object sender, PaintEventArgs e)
-                    {
-                        Rectangle r = panel.ClientRectangle;
-                        DrawRoundedBorder(e.Graphics, r, 18, _cardBorderColor);
-                    };
-                }
+                panel.BorderStyle = drawBorder ? BorderStyle.FixedSingle : BorderStyle.None;
 
                 return panel;
             }
 
             private static Button CreateActionButton(string text, Color backColor)
             {
-                var visual = new ActionButtonVisual
-                {
-                    Text = text ?? string.Empty,
-                    FillColor = backColor
-                };
                 var btn = new Button
                 {
-                    Text = string.Empty,
-                    Tag = visual,
+                    Text = text ?? string.Empty,
                     Dock = DockStyle.Fill,
                     FlatStyle = FlatStyle.Flat,
-                    BackColor = Color.Transparent,
+                    BackColor = backColor,
                     ForeColor = Color.FromArgb(20, 26, 34),
-                    Font = new Font("Segoe UI", 12F, FontStyle.Bold),
+                    Font = new Font("Segoe UI", 11F, FontStyle.Regular),
                     Cursor = Cursors.Hand,
                     Height = 68,
                     TextAlign = ContentAlignment.MiddleCenter,
                     UseVisualStyleBackColor = false
                 };
                 ApplyActionButtonStyle(btn, backColor);
-                btn.Paint += ActionButtonPaint;
                 return btn;
             }
 
             private static void ApplyActionButtonStyle(Button button, Color backColor)
             {
-                var visual = button.Tag as ActionButtonVisual;
-                if (visual != null)
-                {
-                    visual.FillColor = backColor;
-                }
-                button.BackColor = Color.Transparent;
+                button.BackColor = backColor;
                 button.ForeColor = Color.FromArgb(20, 26, 34);
-                button.FlatAppearance.BorderSize = 0;
-                button.FlatAppearance.MouseOverBackColor = Color.Transparent;
-                button.FlatAppearance.MouseDownBackColor = Color.Transparent;
+                button.FlatAppearance.BorderSize = 1;
+                button.FlatAppearance.BorderColor = LightenColor(backColor, -16);
+                button.FlatAppearance.MouseOverBackColor = LightenColor(backColor, 9);
+                button.FlatAppearance.MouseDownBackColor = LightenColor(backColor, -12);
             }
 
             private static void ActionButtonPaint(object sender, PaintEventArgs e)
@@ -5288,6 +5167,48 @@ namespace OpenClawControlPanel
                 Cursor = busy ? Cursors.WaitCursor : Cursors.Default;
             }
 
+            private void CancelStartupProbe(bool bumpGeneration)
+            {
+                _startupProbePending = false;
+                _startupProbeTimer.Stop();
+                if (bumpGeneration)
+                {
+                    _operationGeneration++;
+                }
+            }
+
+            private void RunBackgroundHealthProbe(int generation)
+            {
+                var worker = new BackgroundWorker();
+                worker.DoWork += delegate(object sender, DoWorkEventArgs e)
+                {
+                    e.Result = RunCommandCapture(BuildStatusCommandSpec());
+                };
+                worker.RunWorkerCompleted += delegate(object sender, RunWorkerCompletedEventArgs e)
+                {
+                    if (generation != _operationGeneration || _busy)
+                    {
+                        return;
+                    }
+
+                    if (e.Error != null)
+                    {
+                        AppendLog(Tr("Startup background health check failed.", "启动后的后台健康检查失败。"));
+                        return;
+                    }
+
+                    var result = e.Result as CommandResult;
+                    if (result == null)
+                    {
+                        AppendLog(Tr("Startup background health check returned no result.", "启动后的后台健康检查未返回结果。"));
+                        return;
+                    }
+
+                    ApplyHealthCheckResult(result, true);
+                };
+                worker.RunWorkerAsync();
+            }
+
             private void SetStatusNeutral(string titleEnglish, string titleChinese, string detailEnglish, string detailChinese)
             {
                 _statusTone = StatusTone.Neutral;
@@ -5389,6 +5310,7 @@ namespace OpenClawControlPanel
 
             private void RunInstallSetup()
             {
+                CancelStartupProbe(true);
                 ResolveEffectiveMode(true, true);
                 AppendLog(
                     Tr("Running setup/install for mode: ", "正在执行安装/初始化，模式：") +
@@ -5414,6 +5336,7 @@ namespace OpenClawControlPanel
 
             private void StartOpenClaw()
             {
+                CancelStartupProbe(true);
                 ResolveEffectiveMode(true, false);
                 AppendLog(Tr("Starting OpenClaw...", "正在启动 OpenClaw..."));
                 AppendLog(
@@ -5455,6 +5378,7 @@ namespace OpenClawControlPanel
 
             private void StopOpenClaw()
             {
+                CancelStartupProbe(true);
                 ResolveEffectiveMode(true, false);
                 AppendLog(Tr("Stopping OpenClaw...", "正在停止 OpenClaw..."));
                 RunWorker(
@@ -5478,6 +5402,7 @@ namespace OpenClawControlPanel
 
             private void OpenDashboard()
             {
+                CancelStartupProbe(true);
                 ResolveEffectiveMode(false, false);
                 AppendLog(Tr("Opening dashboard...", "正在打开 Dashboard..."));
                 RunWorker(
@@ -5513,6 +5438,7 @@ namespace OpenClawControlPanel
 
             private void CheckHealth()
             {
+                CancelStartupProbe(true);
                 ResolveEffectiveMode(true, false);
                 AppendLog(Tr("Checking status and health...", "正在检查状态与健康度..."));
                 RunWorker(
@@ -5520,76 +5446,184 @@ namespace OpenClawControlPanel
                     delegate { return RunCommandCapture(BuildStatusCommandSpec()); },
                     delegate(CommandResult result)
                     {
-                        EmitOutput(result.Output);
-
-                        if (result.ExitCode != 0)
-                        {
-                            SetStatusBad("Health Check Failed", "健康检查失败", "Exit code: " + result.ExitCode, "退出码：" + result.ExitCode);
-                            return;
-                        }
-
-                        var kv = ParseKeyValueLines(result.Output);
-                        bool dockerUp = Get(kv, "docker") == "up";
-                        string gatewayState = FirstNonEmpty(Get(kv, "gateway"), Get(kv, "gateway_container"));
-                        bool gatewayRunning = string.Equals(gatewayState, "running", StringComparison.OrdinalIgnoreCase);
-                        bool tokenOk = Get(kv, "token") == "ok";
-                        string httpRoot = Get(kv, "http_root");
-                        string httpHealth = Get(kv, "http_health");
-                        bool httpRootOk = httpRoot == "200" || httpRoot == "301" || httpRoot == "302" || httpRoot == "401" || httpRoot == "403";
-                        bool dockerStateKnownDown = Get(kv, "docker") == "down";
-                        bool dockerStateKnownUp = dockerUp;
-
-                        if (gatewayRunning && httpRootOk)
-                        {
-                            SetStatusGood("Healthy", "健康", "Gateway is reachable and healthy.", "网关可达且健康。");
-                        }
-                        else if (gatewayRunning)
-                        {
-                            SetStatusWarn("HTTP Issue", "HTTP 异常", "Container runs but HTTP health is abnormal.", "容器已运行，但 HTTP 健康异常。");
-                        }
-                        else if (dockerStateKnownDown)
-                        {
-                            SetStatusBad("Docker Down", "Docker 未运行", "Docker runtime is not reachable.", "Docker 运行时不可达。");
-                        }
-                        else if (dockerStateKnownUp && !gatewayRunning)
-                        {
-                            SetStatusNeutral("Not Running", "未运行", "Gateway container/process is not running.", "网关容器/进程未运行。");
-                        }
-                        else
-                        {
-                            SetStatusNeutral("Not Running", "未运行", "OpenClaw gateway is not running.", "OpenClaw 网关未运行。");
-                        }
-
-                        string modeValue = FirstNonEmpty(Get(kv, "mode"), ModeToConfigValue(_effectiveMode));
-                        AppendLog(Tr("Summary: docker=", "摘要：docker=") + Get(kv, "docker") +
-                                  "; gateway=" + gatewayState +
-                                  "; token=" + Get(kv, "token") +
-                                  "; http_root=" + httpRoot +
-                                  "; http_health=" + httpHealth +
-                                  "; mode=" + modeValue);
-
-                        if (!tokenOk)
-                        {
-                            AppendLog(Tr("Hint: token missing. Click 'Start OPENCLAW' first.", "提示：token 缺失，请先点击“启动 OPENCLAW”。"));
-                        }
+                        ApplyHealthCheckResult(result, false);
                     });
+            }
+
+            private void ApplyHealthCheckResult(CommandResult result, bool backgroundProbe)
+            {
+                if (!backgroundProbe)
+                {
+                    EmitOutput(result.Output);
+                }
+
+                if (result.ExitCode != 0)
+                {
+                    SetStatusBad("Health Check Failed", "健康检查失败", "Exit code: " + result.ExitCode, "退出码：" + result.ExitCode);
+                    if (backgroundProbe)
+                    {
+                        AppendLog(Tr("Startup background health check failed. Exit code: ", "启动后的后台健康检查失败。退出码：") + result.ExitCode);
+                    }
+                    return;
+                }
+
+                var kv = ParseKeyValueLines(result.Output);
+                bool dockerUp = Get(kv, "docker") == "up";
+                string gatewayState = FirstNonEmpty(Get(kv, "gateway"), Get(kv, "gateway_container"));
+                bool gatewayRunning = string.Equals(gatewayState, "running", StringComparison.OrdinalIgnoreCase);
+                bool tokenOk = Get(kv, "token") == "ok";
+                string httpRoot = Get(kv, "http_root");
+                string httpHealth = Get(kv, "http_health");
+                bool httpRootOk = httpRoot == "200" || httpRoot == "301" || httpRoot == "302" || httpRoot == "401" || httpRoot == "403";
+                bool dockerStateKnownDown = Get(kv, "docker") == "down";
+                bool dockerStateKnownUp = dockerUp;
+
+                if (gatewayRunning && httpRootOk)
+                {
+                    SetStatusGood("Healthy", "健康", "Gateway is reachable and healthy.", "网关可达且健康。");
+                }
+                else if (gatewayRunning)
+                {
+                    SetStatusWarn("HTTP Issue", "HTTP 异常", "Container runs but HTTP health is abnormal.", "容器已运行，但 HTTP 健康异常。");
+                }
+                else if (dockerStateKnownDown)
+                {
+                    SetStatusBad("Docker Down", "Docker 未运行", "Docker runtime is not reachable.", "Docker 运行时不可达。");
+                }
+                else if (dockerStateKnownUp && !gatewayRunning)
+                {
+                    SetStatusNeutral("Not Running", "未运行", "Gateway container/process is not running.", "网关容器/进程未运行。");
+                }
+                else
+                {
+                    SetStatusNeutral("Not Running", "未运行", "OpenClaw gateway is not running.", "OpenClaw 网关未运行。");
+                }
+
+                string modeValue = FirstNonEmpty(Get(kv, "mode"), ModeToConfigValue(_effectiveMode));
+                string summary = Tr("Summary: docker=", "摘要：docker=") + Get(kv, "docker") +
+                                 "; gateway=" + gatewayState +
+                                 "; token=" + Get(kv, "token") +
+                                 "; http_root=" + httpRoot +
+                                 "; http_health=" + httpHealth +
+                                 "; mode=" + modeValue;
+                AppendLog(backgroundProbe
+                    ? Tr("Startup check: ", "启动检查：") + summary
+                    : summary);
+
+                if (!backgroundProbe && !tokenOk)
+                {
+                    AppendLog(Tr("Hint: token missing. Click 'Start OPENCLAW' first.", "提示：token 缺失，请先点击“启动 OPENCLAW”。"));
+                }
             }
 
             private void AppendLog(string msg)
             {
-                string ts = DateTime.Now.ToString("HH:mm:ss");
-                _logBox.SelectionStart = _logBox.TextLength;
-                _logBox.SelectionColor = _logTimestampColor;
-                _logBox.AppendText(ts + " ");
-                _logBox.SelectionColor = ResolveLogLineColor(msg);
-                _logBox.AppendText(msg + Environment.NewLine);
-                _logBox.SelectionStart = _logBox.TextLength;
-                _logBox.ScrollToCaret();
-
-                if (_logBox.TextLength > 180000)
+                _pendingLogEntries.Enqueue(new LogEntry
                 {
-                    _logBox.Select(0, 60000);
+                    Timestamp = DateTime.Now.ToString("HH:mm:ss"),
+                    Message = msg ?? string.Empty,
+                    MessageColor = ResolveLogLineColor(msg)
+                });
+                if (!_logFlushTimer.Enabled)
+                {
+                    _logFlushTimer.Start();
+                }
+            }
+
+            private void LogFlushTimerOnTick(object sender, EventArgs e)
+            {
+                FlushPendingLogEntries();
+            }
+
+            private void FlushPendingLogEntries()
+            {
+                if (_pendingLogEntries.Count == 0)
+                {
+                    _logFlushTimer.Stop();
+                    return;
+                }
+
+                bool autoScroll = IsLogViewNearBottom();
+                _logBox.SuspendLayout();
+                try
+                {
+                    while (_pendingLogEntries.Count > 0)
+                    {
+                        LogEntry entry = _pendingLogEntries.Dequeue();
+                        _logBox.SelectionStart = _logBox.TextLength;
+                        _logBox.SelectionLength = 0;
+                        _logBox.SelectionColor = _logTimestampColor;
+                        _logBox.AppendText(entry.Timestamp + " ");
+                        _logBox.SelectionColor = entry.MessageColor;
+                        _logBox.AppendText((entry.Message ?? string.Empty) + Environment.NewLine);
+                    }
+
+                    TrimLogBuffer();
+                    if (autoScroll)
+                    {
+                        _logBox.SelectionStart = _logBox.TextLength;
+                        _logBox.SelectionLength = 0;
+                        _logBox.ScrollToCaret();
+                    }
+                }
+                finally
+                {
+                    _logBox.ResumeLayout();
+                    if (_pendingLogEntries.Count == 0)
+                    {
+                        _logFlushTimer.Stop();
+                    }
+                }
+            }
+
+            private bool IsLogViewNearBottom()
+            {
+                if (_logBox.TextLength == 0)
+                {
+                    return true;
+                }
+
+                try
+                {
+                    Point probePoint = new Point(
+                        Math.Max(1, _logBox.ClientSize.Width / 2),
+                        Math.Max(1, _logBox.ClientSize.Height - _logBox.Font.Height - 4));
+                    int lastVisibleChar = _logBox.GetCharIndexFromPosition(probePoint);
+                    if (lastVisibleChar < 0)
+                    {
+                        return true;
+                    }
+                    return (_logBox.TextLength - lastVisibleChar) < 512;
+                }
+                catch
+                {
+                    return true;
+                }
+            }
+
+            private void TrimLogBuffer()
+            {
+                try
+                {
+                    int totalLines = _logBox.GetLineFromCharIndex(Math.Max(0, _logBox.TextLength - 1)) + 1;
+                    const int maxLines = 1200;
+                    if (totalLines <= maxLines)
+                    {
+                        return;
+                    }
+
+                    int removeLines = totalLines - maxLines;
+                    int removeChars = _logBox.GetFirstCharIndexFromLine(removeLines);
+                    if (removeChars <= 0)
+                    {
+                        return;
+                    }
+
+                    _logBox.Select(0, removeChars);
                     _logBox.SelectedText = string.Empty;
+                }
+                catch
+                {
                 }
             }
 
