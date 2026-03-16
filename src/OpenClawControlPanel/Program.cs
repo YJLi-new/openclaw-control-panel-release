@@ -1873,12 +1873,14 @@ namespace OpenClawControlPanel
                     "  exit 0",
                     "fi",
                     "nohup \"$OPENCLAW_BIN\" gateway run --bind loopback --port " + port + " --allow-unconfigured >/tmp/openclaw-native-gateway.log 2>&1 &",
-                    "sleep 1",
-                    "if pgrep -f \"openclaw gateway\" >/dev/null 2>&1; then",
-                    "  echo \"fallback=run-background\"",
-                    "  echo \"ok=1\"",
-                    "  exit 0",
-                    "fi",
+                    "for _try in 1 2 3 4 5; do",
+                    "  if ss -ltn 2>/dev/null | grep -F \":" + port + "\" >/dev/null 2>&1; then",
+                    "    echo \"fallback=run-background\"",
+                    "    echo \"ok=1\"",
+                    "    exit 0",
+                    "  fi",
+                    "  sleep 1",
+                    "done",
                     "echo \"ok=0\"",
                     "exit 1");
             }
@@ -1886,6 +1888,7 @@ namespace OpenClawControlPanel
             private string BuildWslNativeStopCommand()
             {
                 string openclaw = NormalizeCommandText(_wslNativeOpenclawCommand, DefaultWslNativeOpenclawCommand);
+                int port = GetGatewayPort();
                 return string.Join(
                     "\n",
                     "set +e",
@@ -1894,8 +1897,20 @@ namespace OpenClawControlPanel
                     "\"$OPENCLAW_BIN\" gateway stop >/tmp/openclaw-native-stop.log 2>&1",
                     "stop_ec=$?",
                     "cat /tmp/openclaw-native-stop.log 2>/dev/null || true",
-                    "if [ $stop_ec -ne 0 ]; then",
-                    "  pkill -f \"openclaw gateway\" >/dev/null 2>&1 || true",
+                    "if [ $stop_ec -ne 0 ] || ss -ltn 2>/dev/null | grep -F \":" + port + "\" >/dev/null 2>&1; then",
+                    "  listener_pids=\"$(ss -ltnp 2>/dev/null | grep -F \":" + port + "\" | sed -n 's/.*pid=\\([0-9][0-9]*\\).*/\\1/p' | sort -u)\"",
+                    "  if [ -n \"$listener_pids\" ]; then",
+                    "    kill $listener_pids >/dev/null 2>&1 || true",
+                    "    sleep 1",
+                    "    if ss -ltn 2>/dev/null | grep -F \":" + port + "\" >/dev/null 2>&1; then",
+                    "      kill -9 $listener_pids >/dev/null 2>&1 || true",
+                    "      sleep 1",
+                    "    fi",
+                    "  fi",
+                    "fi",
+                    "if ss -ltn 2>/dev/null | grep -F \":" + port + "\" >/dev/null 2>&1; then",
+                    "  echo \"ok=0\"",
+                    "  exit 1",
                     "fi",
                     "echo \"ok=1\"",
                     "exit 0");
