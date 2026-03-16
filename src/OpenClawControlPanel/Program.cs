@@ -331,7 +331,7 @@ namespace OpenClawControlPanel
             private string _wslDataDir = DefaultBaseDirWsl + "/openclaw-data";
             private string _wslStartScriptPath = DefaultBaseDirWsl + "/openclaw-start-fast.sh";
             private string _wslOpenDashboardScriptPath = DefaultBaseDirWsl + "/openclaw-open-dashboard-wsl.sh";
-            private string _wslNativeProjectDir = DefaultBaseDirWsl + "/openclaw";
+            private string _wslNativeProjectDir = DefaultBaseDirWsl;
             private string _wslNativeOpenclawCommand = DefaultWslNativeOpenclawCommand;
             private string _wslNativeInstallCommand = "curl -fsSL https://openclaw.ai/install.sh | bash";
             private string _winDockerOpenclawDir = DefaultBaseDirWindows + "\\openclaw";
@@ -823,7 +823,7 @@ namespace OpenClawControlPanel
                 _wslDataDir = NormalizeWslPath(_wslProjectDir + "/openclaw-data");
                 _wslStartScriptPath = NormalizeWslPath(_wslProjectDir + "/openclaw-start-fast.sh");
                 _wslOpenDashboardScriptPath = NormalizeWslPath(_wslProjectDir + "/openclaw-open-dashboard-wsl.sh");
-                _wslNativeProjectDir = NormalizeWslPath(DefaultBaseDirWsl + "/openclaw");
+                _wslNativeProjectDir = NormalizeWslPath(_wslProjectDir);
                 _wslNativeOpenclawCommand = NormalizeCommandText(DefaultWslNativeOpenclawCommand, DefaultWslNativeOpenclawCommand);
                 _wslNativeInstallCommand = "curl -fsSL https://openclaw.ai/install.sh | bash";
                 _winDockerOpenclawDir = NormalizeWindowsPath(DefaultBaseDirWindows + "\\openclaw");
@@ -933,7 +933,7 @@ namespace OpenClawControlPanel
                     _wslDataDir = ResolveWslPath(dataDir, _wslProjectDir + "/openclaw-data", _wslProjectDir);
                     _wslStartScriptPath = ResolveWslPath(startScript, _wslProjectDir + "/openclaw-start-fast.sh", _wslProjectDir);
                     _wslOpenDashboardScriptPath = ResolveWslPath(dashboardScript, _wslProjectDir + "/openclaw-open-dashboard-wsl.sh", _wslProjectDir);
-                    _wslNativeProjectDir = ResolveWslPath(wslNativeProject, _wslProjectDir + "/openclaw", _wslProjectDir);
+                    _wslNativeProjectDir = ResolveWslPath(wslNativeProject, _wslProjectDir, _wslProjectDir);
                     _wslNativeOpenclawCommand = NormalizeCommandText(
                         wslNativeOpenclawCommand,
                         DefaultWslNativeOpenclawCommand);
@@ -1863,7 +1863,7 @@ namespace OpenClawControlPanel
                     "\n",
                     "set +e",
                     BuildWslProxyPrelude(),
-                    "cd " + BashQuote(_wslNativeProjectDir),
+                    "if [ -d " + BashQuote(_wslNativeProjectDir) + " ]; then cd " + BashQuote(_wslNativeProjectDir) + "; fi",
                     "OPENCLAW_BIN=" + BashQuote(openclaw),
                     "\"$OPENCLAW_BIN\" gateway start >/tmp/openclaw-native-start.log 2>&1",
                     "start_ec=$?",
@@ -3535,7 +3535,7 @@ namespace OpenClawControlPanel
                         TrySetCueBanner(txtWslData, Tr("e.g. /mnt/x/openclaw/openclaw-data", "例如：/mnt/x/openclaw/openclaw-data"));
                         TrySetCueBanner(txtStartScript, Tr("e.g. /mnt/x/openclaw/openclaw-start-fast.sh", "例如：/mnt/x/openclaw/openclaw-start-fast.sh"));
                         TrySetCueBanner(txtDashboardScript, Tr("e.g. /mnt/x/openclaw/openclaw-open-dashboard-wsl.sh", "例如：/mnt/x/openclaw/openclaw-open-dashboard-wsl.sh"));
-                        TrySetCueBanner(txtWslNativeProject, Tr("e.g. /mnt/x/openclaw/openclaw", "例如：/mnt/x/openclaw/openclaw"));
+                        TrySetCueBanner(txtWslNativeProject, Tr("e.g. /mnt/x/openclaw", "例如：/mnt/x/openclaw"));
                         TrySetCueBanner(txtWinDockerDir, Tr(@"e.g. E:\OpenClaw\openclaw", @"例如：E:\OpenClaw\openclaw"));
                         TrySetCueBanner(txtWinDockerData, Tr(@"e.g. E:\OpenClaw\openclaw-data", @"例如：E:\OpenClaw\openclaw-data"));
                         TrySetCueBanner(txtWinNativeProject, Tr(@"e.g. E:\OpenClaw", @"例如：E:\OpenClaw"));
@@ -3768,7 +3768,7 @@ namespace OpenClawControlPanel
                         string newWslData = ResolveWslPath(txtWslData.Text, newWslProject + "/openclaw-data", newWslProject);
                         string newStartScript = ResolveWslPath(txtStartScript.Text, newWslProject + "/openclaw-start-fast.sh", newWslProject);
                         string newDashboardScript = ResolveWslPath(txtDashboardScript.Text, newWslProject + "/openclaw-open-dashboard-wsl.sh", newWslProject);
-                        string newWslNativeProject = ResolveWslPath(txtWslNativeProject.Text, newWslProject + "/openclaw", newWslProject);
+                        string newWslNativeProject = ResolveWslPath(txtWslNativeProject.Text, newWslProject, newWslProject);
                         string newWinDockerDir = NormalizeWindowsPath(txtWinDockerDir.Text);
                         string newWinDockerDataDir = NormalizeWindowsPath(txtWinDockerData.Text);
                         string newWinNativeProject = NormalizeWindowsPath(txtWinNativeProject.Text);
