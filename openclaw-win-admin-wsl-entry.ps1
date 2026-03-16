@@ -27,6 +27,31 @@ $env:OPENCLAW_WSL_BRIDGE_DIR = $bridgeStageDir
 $env:OPENCLAW_WSL_DISTRO = $distro
 $env:OPENCLAW_WSL_USER = $linuxUser
 
+function Get-ControlUiUrl {
+  if ($env:OPENCLAW_CONTROL_UI_URL_BASE) {
+    return $env:OPENCLAW_CONTROL_UI_URL_BASE.Trim()
+  }
+
+  $raw = $gatewayUrl.Trim()
+  if ($raw -match '/chat\?session=main/?$') {
+    return $raw
+  }
+
+  try {
+    $uri = [Uri]$raw
+    $builder = [System.UriBuilder]::new($uri)
+    if ($builder.Port -eq 18790) {
+      $builder.Port = 18789
+    }
+    $builder.Path = '/chat'
+    $builder.Query = 'session=main'
+    return $builder.Uri.AbsoluteUri
+  }
+  catch {
+    return ($raw.TrimEnd('/') + '/chat?session=main')
+  }
+}
+
 function Ensure-BridgeInstalled {
   if (-not (Get-ScheduledTask -TaskName $bridgeTaskName -ErrorAction SilentlyContinue)) {
     & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $bridgeInstallScript | Out-Null
@@ -141,6 +166,7 @@ function Get-GatewayState {
 }
 
 function Get-RuntimeDiagnostics {
+  $controlUiUrl = Get-ControlUiUrl
   return @(
     'runtime_host=windows+wsl2',
     'runtime_backend=openclaw-wsl-bridge',
@@ -154,7 +180,7 @@ function Get-RuntimeDiagnostics {
     ('runtime_home_dir=' + $linuxHome),
     ('runtime_config_path=' + $runtimeConfigPath),
     ('runtime_sessions_path=' + $runtimeSessionsPath),
-    ('runtime_dashboard_url=' + $gatewayUrl),
+    ('runtime_dashboard_url=' + $controlUiUrl),
     'runtime_diagnose_hint=openclaw-find-runtime-paths.ps1'
   )
 }
@@ -227,7 +253,7 @@ if ($Args.Count -ge 3 -and $Args[0] -eq 'config' -and $Args[1] -eq 'get' -and $A
 if ($Args.Count -ge 2 -and $Args[0] -eq 'gateway' -and $Args[1] -eq 'status') {
   if ((Get-GatewayState) -eq 'running') {
     Write-Output 'Runtime: running'
-    Write-Output ('Dashboard: ' + $gatewayUrl)
+    Write-Output ('Dashboard: ' + (Get-ControlUiUrl))
   }
   else {
     Write-Output 'Runtime: stopped'
@@ -260,7 +286,7 @@ if ($Args.Count -ge 1 -and $Args[0] -eq 'status') {
 
 if ($Args.Count -ge 1 -and $Args[0] -eq 'dashboard') {
   $token = Get-GatewayToken
-  $url = $gatewayUrl + '#token=' + $token
+  $url = (Get-ControlUiUrl) + '#token=' + $token
   Open-DashboardUrl -Url $url
   Write-Output ('dashboard_url=' + $url)
   exit 0

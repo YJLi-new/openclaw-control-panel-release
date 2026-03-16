@@ -20,6 +20,19 @@ SENTINEL_NAME="${OPENCLAW_WSL_NATIVE_SENTINEL_NAME:-openclaw gateway sentinel}"
 DASHBOARD_URL_BASE="${OPENCLAW_DASHBOARD_URL_BASE:-http://127.0.0.1:18789/}"
 HEALTH_URL="${OPENCLAW_WSL_NATIVE_HEALTH_URL:-${DASHBOARD_URL_BASE%/}/health}"
 
+resolve_control_ui_url() {
+  local raw="${OPENCLAW_CONTROL_UI_URL_BASE:-$DASHBOARD_URL_BASE}"
+  if [[ "$raw" == *"/chat?session=main" ]]; then
+    printf '%s' "$raw"
+    return 0
+  fi
+  if [[ "$raw" =~ ^(https?://[^/:]+):18790/?$ ]]; then
+    printf '%s' "${BASH_REMATCH[1]}:18789/chat?session=main"
+    return 0
+  fi
+  printf '%s' "${raw%/}/chat?session=main"
+}
+
 ensure_parent_dir() {
   mkdir -p "$(dirname "$1")"
 }
@@ -181,7 +194,7 @@ status_block() {
 open_dashboard() {
   local token url
   token="$(get_token)"
-  url="${DASHBOARD_URL_BASE}#token=${token}"
+  url="$(resolve_control_ui_url)#token=${token}"
 
   if command -v powershell.exe >/dev/null 2>&1; then
     powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Start-Process '$url'" >/dev/null 2>&1 || true
@@ -205,7 +218,7 @@ main() {
     ensure_sentinel
     if service_running; then
       echo "Runtime: running"
-      echo "Dashboard: ${DASHBOARD_URL_BASE}"
+      echo "Dashboard: $(resolve_control_ui_url)"
     else
       echo "Runtime: stopped"
     fi

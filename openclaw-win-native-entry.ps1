@@ -20,6 +20,31 @@ function Resolve-WslInvocationPrefix {
   return $argsList
 }
 
+function Get-ControlUiUrl {
+  if ($env:OPENCLAW_CONTROL_UI_URL_BASE) {
+    return $env:OPENCLAW_CONTROL_UI_URL_BASE.Trim()
+  }
+
+  $raw = $gatewayUrl.Trim()
+  if ($raw -match '/chat\?session=main/?$') {
+    return $raw
+  }
+
+  try {
+    $uri = [Uri]$raw
+    $builder = [System.UriBuilder]::new($uri)
+    if ($builder.AbsolutePath -eq '/' -or [string]::IsNullOrWhiteSpace($builder.AbsolutePath)) {
+      $builder.Path = '/chat'
+      $builder.Query = 'session=main'
+      return $builder.Uri.AbsoluteUri
+    }
+  }
+  catch {
+  }
+
+  return ($raw.TrimEnd('/') + '/chat?session=main')
+}
+
 function Invoke-WslCapture {
   param([string]$Command)
   $invokeArgs = Resolve-WslInvocationPrefix
@@ -146,6 +171,7 @@ function Get-RuntimeDiagnostics {
     ('runtime_config_exists=' + $(if (Test-WslFileExists $configPath) { 'yes' } else { 'no' })),
     ('runtime_sessions_path=' + $sessionsPath),
     ('runtime_sessions_exists=' + $(if (Test-WslFileExists $sessionsPath) { 'yes' } else { 'no' })),
+    ('runtime_dashboard_url=' + (Get-ControlUiUrl)),
     'runtime_diagnose_hint=openclaw-find-runtime-paths.ps1'
   )
 
@@ -226,7 +252,7 @@ if ($Args.Count -ge 3 -and $Args[0] -eq 'config' -and $Args[1] -eq 'get' -and $A
 if ($Args.Count -ge 2 -and $Args[0] -eq 'gateway' -and $Args[1] -eq 'status') {
   if ((Get-GatewayState) -eq 'running') {
     Write-Output 'Runtime: running'
-    Write-Output ('Dashboard: ' + $gatewayUrl)
+    Write-Output ('Dashboard: ' + (Get-ControlUiUrl))
   } else {
     Write-Output 'Runtime: stopped'
   }
@@ -261,7 +287,7 @@ if ($Args.Count -ge 1 -and $Args[0] -eq 'status') {
 
 if ($Args.Count -ge 1 -and $Args[0] -eq 'dashboard') {
   $token = Get-GatewayToken
-  $url = $gatewayUrl + '#token=' + $token
+  $url = (Get-ControlUiUrl) + '#token=' + $token
   Open-DashboardUrl -Url $url
   Write-Output ('dashboard_url=' + $url)
   exit 0

@@ -10,13 +10,26 @@ fi
 TOKEN_FILE="${OPENCLAW_TOKEN_FILE:-$HOME/.openclaw/.gateway-token}"
 DASHBOARD_URL_BASE="${OPENCLAW_DASHBOARD_URL_BASE:-http://127.0.0.1:18789/}"
 
+resolve_control_ui_url() {
+  local raw="${OPENCLAW_CONTROL_UI_URL_BASE:-$DASHBOARD_URL_BASE}"
+  if [[ "$raw" == *"/chat?session=main" ]]; then
+    printf '%s' "$raw"
+    return 0
+  fi
+  if [[ "$raw" =~ ^(https?://[^/:]+):18790/?$ ]]; then
+    printf '%s' "${BASH_REMATCH[1]}:18789/chat?session=main"
+    return 0
+  fi
+  printf '%s' "${raw%/}/chat?session=main"
+}
+
 if [[ -f "$TOKEN_FILE" && -s "$TOKEN_FILE" ]]; then
   TOKEN="$(tr -d '\r\n' < "$TOKEN_FILE")"
 else
   TOKEN="dev-local-token"
 fi
 
-URL="${DASHBOARD_URL_BASE}#token=${TOKEN}"
+URL="$(resolve_control_ui_url)#token=${TOKEN}"
 
 if command -v powershell.exe >/dev/null 2>&1; then
   powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Start-Process '$URL'" >/dev/null 2>&1 || true
