@@ -110,6 +110,27 @@ function Get-HttpCode {
   }
 }
 
+function Test-GatewayTcpPort {
+  $client = $null
+  try {
+    $client = [System.Net.Sockets.TcpClient]::new()
+    $async = $client.BeginConnect('127.0.0.1', [int]$gatewayPort, $null, $null)
+    if (-not $async.AsyncWaitHandle.WaitOne(750)) {
+      return $false
+    }
+    $client.EndConnect($async) | Out-Null
+    return $true
+  }
+  catch {
+    return $false
+  }
+  finally {
+    if ($client) {
+      $client.Dispose()
+    }
+  }
+}
+
 function Wait-GatewayState {
   param(
     [Parameter(Mandatory = $true)][bool]$Running,
@@ -117,12 +138,23 @@ function Wait-GatewayState {
   )
 
   $deadline = (Get-Date).AddSeconds($TimeoutSec)
+  $stableMatches = 0
   do {
     $healthy = (Get-HttpCode -Url $healthUrl) -eq '200'
-    if ($Running -and $healthy) {
-      return $true
+    $tcpReachable = Test-GatewayTcpPort
+    $matched = if ($Running) {
+      $healthy -and $tcpReachable
+    } else {
+      (-not $healthy) -and (-not $tcpReachable)
     }
-    if (-not $Running -and -not $healthy) {
+
+    if ($matched) {
+      $stableMatches += 1
+    } else {
+      $stableMatches = 0
+    }
+
+    if ($stableMatches -ge 2) {
       return $true
     }
     Start-Sleep -Milliseconds 750
@@ -146,9 +178,15 @@ function Stop-LingeringGatewayProcesses {
 }
 
 function Start-Gateway {
+  if (Get-ScheduledTask -TaskName $gatewayTaskName -ErrorAction SilentlyContinue) {
+    Stop-ScheduledTask -TaskName $gatewayTaskName -ErrorAction SilentlyContinue
+  }
+  Stop-LingeringGatewayProcesses
+  [void](Wait-GatewayState -Running $false -TimeoutSec 8)
   Ensure-GatewayTask
+  $script:BridgeDashboardUrlCache = $null
   Start-ScheduledTask -TaskName $gatewayTaskName
-  return (Wait-GatewayState -Running $true -TimeoutSec 20)
+  return (Wait-GatewayState -Running $true -TimeoutSec 25)
 }
 
 function Stop-Gateway {
@@ -156,7 +194,8 @@ function Stop-Gateway {
     Stop-ScheduledTask -TaskName $gatewayTaskName -ErrorAction SilentlyContinue
   }
   Stop-LingeringGatewayProcesses
-  [void](Wait-GatewayState -Running $false -TimeoutSec 10)
+  $script:BridgeDashboardUrlCache = $null
+  [void](Wait-GatewayState -Running $false -TimeoutSec 15)
 }
 
 function Get-GatewayToken {
@@ -317,6 +356,10 @@ if ($Args.Count -ge 1 -and $Args[0] -eq 'status') {
 }
 
 if ($Args.Count -ge 1 -and $Args[0] -eq 'dashboard') {
+  if (-not (Wait-GatewayState -Running $true -TimeoutSec 15)) {
+    Write-Output ("Gateway not reachable at '" + $gatewayUrl + "'")
+    exit 1
+  }
   $url = Get-BridgeDashboardUrl
   if ([string]::IsNullOrWhiteSpace($url)) {
     $token = Get-GatewayToken

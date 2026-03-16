@@ -202,6 +202,24 @@ probe_http_code() {
   fi
 }
 
+wait_for_gateway_up() {
+  local stable_hits=0
+  local health_code
+  for _try in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    health_code="$(probe_http_code "$HEALTH_URL")"
+    if [[ "$health_code" == "200" ]]; then
+      stable_hits=$((stable_hits + 1))
+      if [[ "$stable_hits" -ge 2 ]]; then
+        return 0
+      fi
+    else
+      stable_hits=0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 status_block() {
   local token root_code health_code action_name
   action_name="${1:-status}"
@@ -249,6 +267,10 @@ open_dashboard() {
   url="$(get_dashboard_url "$@")"
   if [[ -z "$url" ]]; then
     url="$(resolve_control_ui_url)"
+  fi
+  if ! wait_for_gateway_up; then
+    printf "Gateway not reachable at '%s'\n" "$DASHBOARD_URL_BASE"
+    return 1
   fi
 
   if [[ "$no_open" -eq 0 ]]; then
